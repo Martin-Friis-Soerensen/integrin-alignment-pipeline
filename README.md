@@ -74,6 +74,10 @@ The pipeline automatically generates required subdirectories within the working 
 - `/Excel_Reports`: Consolidates the JSON data into a structured `.xlsx` report.
 - `/PyMOL_Scripts`: Stores the generated `.pml` sessions.
 
+<img width="1909" height="873" alt="PyMOL_output_prop" src="https://github.com/user-attachments/assets/65756345-981f-4fee-b5ca-76b8a41c4678" />
+<img width="1914" height="878" alt="PyMOL_output_angle" src="https://github.com/user-attachments/assets/6b51ba9a-43ce-4c15-bc9c-c20a39a382f5" />
+
+
 ## Future Development
 The current iteration of this pipeline is optimized specifically for integrin structural analysis utilizing predefined reference coordinates (e.g., PDB 9T3Y, 7USM). Future updates will generalize the alignment algorithm to accept any standard user-defined input sequence and automate the corresponding PyMOL structural overlays across varied protein families.
 
