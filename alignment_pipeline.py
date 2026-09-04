@@ -258,9 +258,8 @@ def align_propeller(csv_filename, seq_cutoff=0.85, ref_pdb="9T3Y", ref_chain="A"
     cutoff_str = int(seq_cutoff * 100)
     export_json(f"{csv_filename.replace('.csv', '')}_{cutoff_str}_Propeller.json", {"Reference": ref_pdb, "Domain": "Beta-Propeller"}, results)
 
-def angle_align(csv_filename, seq_cutoff=0.85, ref_pdb="7USM", ref_chain="A"):
-    MIN_ATOMS = 150   
-    MAX_RMSD = 10.0   
+def angle_align(csv_filename, seq_cutoff=0.85, ref_pdb="7USM", ref_chain="A", MAX_RMSD=4):
+    MIN_ATOMS = 150    
 
     cmd.reinitialize() 
     cmd.set("fetch_path", FOLDERS["cif"])
@@ -506,7 +505,7 @@ def smart_align(csv_filename, seq_cutoff=0.85, ref_pdb="9T3Y", ref_chain="A", pr
 # =========================================================
 # CENTRAL PIPELINE FUNCTIONS
 # =========================================================
-def execute_pymol_alignments(csv_filename, functions_to_run, seq_cutoff=0.85, force_redo=False, ref_pdb="9T3Y", prop_resi="1-126+322-600"):
+def execute_pymol_alignments(csv_filename, functions_to_run, seq_cutoff=0.85, force_redo=False, ref_pdb="9T3Y", prop_resi="1-126+322-600", MAX_RMSD=4):
     print(f"-> Checking PyMOL protocols for {csv_filename}...")
     base_name = csv_filename.replace('.csv', '')
     cutoff_str = int(seq_cutoff * 100)
@@ -541,7 +540,7 @@ def execute_pymol_alignments(csv_filename, functions_to_run, seq_cutoff=0.85, fo
         if func == "align_propeller":
             align_propeller(csv_filename, seq_cutoff=seq_cutoff, ref_pdb=ref_pdb, prop_resi=prop_resi)
         elif func == "angle_align":
-            angle_align(csv_filename, seq_cutoff=seq_cutoff) 
+            angle_align(csv_filename, seq_cutoff=seq_cutoff, MAX_RMSD=MAX_RMSD) 
         elif func == "align_integrin":
             align_integrin(csv_filename, seq_cutoff=seq_cutoff, ref_pdb=ref_pdb)
         elif func == "smart_align":
@@ -554,40 +553,88 @@ def compile_results(integrin_dict, base_filename, seq_cutoff, timestamp):
     cutoff_str = int(seq_cutoff * 100)
     
     try:
+        all_meta_list = []
+        all_results_list = []
+        individual_sheets = {} 
+        
+        for name in integrin_dict.keys():
+            df_meta = None
+            csv_path = os.path.join(FOLDERS["csv"], f"{name}.csv")
+            if os.path.exists(csv_path):
+                df_meta = pd.read_csv(csv_path, sep=';', encoding='utf-8-sig')
+                
+                df_meta_master = df_meta.copy()
+                df_meta_master.insert(0, 'Integrin_Target', name)
+                all_meta_list.append(df_meta_master)
+            
+            df_combined = None
+            ordered_suffixes = [f"_{cutoff_str}_Propeller.json", f"_{cutoff_str}_Angles.json", f"_{cutoff_str}_Whole.json", f"_{cutoff_str}_Smart.json"]
+            
+            for suffix in ordered_suffixes:
+                json_path = os.path.join(FOLDERS["res"], f"{name}{suffix}")
+                if os.path.exists(json_path):
+                    with open(json_path, 'r') as f:
+                        data = json.load(f)
+                        df_temp = pd.DataFrame(data["results"])
+                        
+                        if df_combined is None:
+                            df_combined = df_temp
+                        else:
+                            if 'Structure_ID' in df_combined.columns and 'Structure_ID' in df_temp.columns:
+                                df_combined = pd.merge(df_combined, df_temp, on='Structure_ID', how='outer')
+            
+            if df_combined is not None and not df_combined.empty:
+                if 'Propeller RMSD (Å)' in df_combined.columns:
+                    df_combined['Propeller RMSD (Å)'] = pd.to_numeric(df_combined['Propeller RMSD (Å)'], errors='coerce')
+                
+                df_combined['is_ref'] = df_combined.apply(lambda row: any(isinstance(v, str) and "Reference" in v for v in row.values), axis=1)
+                
+                has_propeller = 'Propeller RMSD (Å)' in df_combined.columns
+                df_combined['is_excluded'] = df_combined['Propeller RMSD (Å)'].isna() if has_propeller else False
+                
+                if has_propeller:
+                    df_combined.sort_values(by=['is_ref', 'is_excluded', 'Propeller RMSD (Å)', 'Structure_ID'], ascending=[True, True, True, True], inplace=True)
+                else:
+                    df_combined.sort_values(by=['is_ref', 'Structure_ID'], ascending=[True, True], inplace=True)
+                
+                df_combined.drop(columns=['is_ref', 'is_excluded'], inplace=True)
+                
+                df_combined = df_combined.astype(object)
+                df_combined.fillna('N/A', inplace=True)
+                
+                df_combined_master = df_combined.copy()
+                df_combined_master.insert(0, 'Integrin_Target', name)
+                all_results_list.append(df_combined_master)
+
+            individual_sheets[name] = {'meta': df_meta, 'results': df_combined}
+
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             sheets_created = 0
             
-            for name in integrin_dict.keys():
-                csv_path = os.path.join(FOLDERS["csv"], f"{name}.csv")
-                if os.path.exists(csv_path):
-                    df_meta = pd.read_csv(csv_path, sep=';', encoding='utf-8-sig')
-                    df_meta.to_excel(writer, sheet_name=f"{name}_Metadata"[:31], index=False)
+            if all_meta_list:
+                master_meta_df = pd.concat(all_meta_list, ignore_index=True)
+                master_meta_df.to_excel(writer, sheet_name="00_All_Metadata", index=False)
+                sheets_created += 1
                 
-                df_combined = None
-                ordered_suffixes = [f"_{cutoff_str}_Propeller.json", f"_{cutoff_str}_Angles.json", f"_{cutoff_str}_Whole.json", f"_{cutoff_str}_Smart.json"]
+            if all_results_list:
+                master_results_df = pd.concat(all_results_list, ignore_index=True)
                 
-                for suffix in ordered_suffixes:
-                    json_path = os.path.join(FOLDERS["res"], f"{name}{suffix}")
-                    if os.path.exists(json_path):
-                        with open(json_path, 'r') as f:
-                            data = json.load(f)
-                            df_temp = pd.DataFrame(data["results"])
-                            
-                            if df_combined is None:
-                                df_combined = df_temp
-                            else:
-                                if 'Structure_ID' in df_combined.columns and 'Structure_ID' in df_temp.columns:
-                                    df_combined = pd.merge(df_combined, df_temp, on='Structure_ID', how='outer')
+                is_ref = master_results_df.apply(lambda row: any(isinstance(v, str) and "Reference" in v for v in row.values), axis=1)
                 
-                if df_combined is not None and not df_combined.empty:
-                    if 'Propeller RMSD (Å)' in df_combined.columns:
-                        df_combined['Propeller RMSD (Å)'] = pd.to_numeric(df_combined['Propeller RMSD (Å)'], errors='coerce')
-                        df_combined.sort_values(by=['Propeller RMSD (Å)', 'Structure_ID'], ascending=[True, True], inplace=True)
-                        
-                    df_combined = df_combined.astype(object)
-                    df_combined.fillna('N/A', inplace=True)
-                    
-                    df_combined.to_excel(writer, sheet_name=f"{name}_Results"[:31], index=False)
+                ref_duplicates = master_results_df[is_ref].duplicated(subset=['Structure_ID'], keep='first')
+                indices_to_drop = ref_duplicates[ref_duplicates].index
+                
+                master_results_df = master_results_df.drop(indices_to_drop)
+                
+                master_results_df.to_excel(writer, sheet_name="00_All_Results", index=False)
+                sheets_created += 1
+            
+            for name, sheets in individual_sheets.items():
+                if sheets['meta'] is not None and not sheets['meta'].empty:
+                    sheets['meta'].to_excel(writer, sheet_name=f"{name}_Metadata"[:31], index=False)
+                    sheets_created += 1
+                if sheets['results'] is not None and not sheets['results'].empty:
+                    sheets['results'].to_excel(writer, sheet_name=f"{name}_Results"[:31], index=False)
                     sheets_created += 1
 
             if sheets_created == 0:
@@ -712,7 +759,7 @@ def build_visual_session(targets_dict, seq_cutoff, functions_to_run, ref_pdb, pr
     print("   -> Launching PyMOL GUI. Please interact with the new window!")
     subprocess.Popen(f'pymol -q "{pml_path}"', shell=True)
 
-def run_pipeline(targets, pymol_commands, source_type="uniprot", identity_cutoff=0.85, force_redo=False, ref_pdb="9T3Y", prop_resi="1-126+322-600", is_visual=False):
+def run_pipeline(targets, pymol_commands, source_type="uniprot", identity_cutoff=0.85, force_redo=False, ref_pdb="9T3Y", prop_resi="1-126+322-600", is_visual=False, MAX_RMSD=4):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     for name, data in targets.items():
@@ -727,7 +774,7 @@ def run_pipeline(targets, pymol_commands, source_type="uniprot", identity_cutoff
                 continue
             
             print(f"-> Bypassing PDB search. Utilizing existing file: {csv_name}")
-            execute_pymol_alignments(csv_name, pymol_commands, seq_cutoff=identity_cutoff, force_redo=force_redo, ref_pdb=ref_pdb, prop_resi=prop_resi)
+            execute_pymol_alignments(csv_name, pymol_commands, seq_cutoff=identity_cutoff, force_redo=force_redo, ref_pdb=ref_pdb, prop_resi=prop_resi, MAX_RMSD=MAX_RMSD)
             
         else:
             csv_name = f"{name}.csv"
@@ -837,6 +884,9 @@ if __name__ == "__main__":
     custom_resi = input("Propeller Residues for Reference (Default: 1-126+322-600): ").strip()
     prop_residues = custom_resi if custom_resi else "1-126+322-600"
 
+    raw_rmsd = input("Max Angle RMSD Threshold (Å) (Default: 4): ").strip()
+    custom_max_rmsd = float(raw_rmsd) if raw_rmsd else 4
+
     print("\n" + "-"*55)
     print("Which PyMOL protocols would you like to execute?")
     print("  [1] Propeller Align : Strict alignment to beta-propeller.")
@@ -862,4 +912,4 @@ if __name__ == "__main__":
         for c in choices:
             if c in func_map: pymol_cmds.append(func_map[c])
             
-    run_pipeline(targets_dict, pymol_cmds, source_type, seq_cutoff, force_redo, ref_pdb_id, prop_residues, is_visual)
+    run_pipeline(targets_dict, pymol_cmds, source_type, seq_cutoff, force_redo, ref_pdb_id, prop_residues, is_visual, custom_max_rmsd)
